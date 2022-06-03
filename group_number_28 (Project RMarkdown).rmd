@@ -1,0 +1,640 @@
+---
+title: "Group Assignment for IB9BW0"
+author: "MSBA Group 28"
+date: "11/17/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, echo=FALSE}
+# Install required packages
+# install.packages('tidyverse')
+# install.packages('dplyr')
+# install.packages('caTools')
+# install.packages('FSelector')
+# install.packages('ROSE')
+# install.packages('smotefamily')
+# install.packages('caret')
+# install.packages('e1071')
+# install.packages('randomForest')
+# install.packages('gbm')
+# install.packages('tree')
+# install.packages('maptree')
+# install.packages("pROC")
+# install.packages("CustomerScoringMetrics")
+
+# Load tidyverse and dplyr package for data manipulation
+library(tidyverse)
+library(dplyr)
+
+# Load caTools package for data partitioning
+library(caTools)
+
+# Load FSelector package for feature selection
+library(FSelector)
+
+# Load ROSE and smotefamily for data rebalancing
+library(ROSE)
+library(smotefamily)
+
+# Load packages for SVM, RF, GBM, TREE and LR
+library(e1071)
+library(randomForest)
+library(gbm)
+library(tree)
+library(maptree)
+
+# Load Caret package for computing Confusion matrix
+library(caret)
+
+# Load the ROCR package for ROC curve (AUC)
+library(pROC) 
+
+# Load the CustomerScoringMetrics package for gain chart plot
+library(CustomerScoringMetrics)
+```
+
+# Data Preparation stage in CRISP-DM
+## Viewing dataset and treating anomalous data 
+``` {r}
+# Import the data as data_original
+data_original <- read.csv("assignment_data.csv")
+
+# View the types of data 
+str(data_original)    # the types are all 'int'
+
+# Check for data anomalies
+summary(data_original)
+```
+
+```{r}
+# Remove NA values
+data_updated <- na.omit(data_original)   
+nrow(data_original) - nrow(data_updated)  # Remove 228 records with missing values
+
+# Remove client ID
+data_updated$ID <- NULL
+
+# Remove redundant variables
+data_updated$CM_HIST <- NULL
+
+# Remove duplicate records
+data_updated <- distinct(data_updated)
+```
+
+```{r}
+# Merge duplicate category names for the variable, "EDUCATION" 
+data_updated$EDUCATION <- plyr::mapvalues(data_updated$EDUCATION, from=c(0,1,2,3,4,5,6), to=c(4,1,2,3,4,5,6))
+table(data_updated$EDUCATION)
+
+# Reorganise into an ordinal data for the variable, "EDUCATION" with (1=unknown, 2=others, 3=high school, 4=university, 5=graduate school, 6=special program)
+data_updated$EDUCATION <- plyr::mapvalues(data_updated$EDUCATION, from=c(1,2,3,4,5,6), to=c(5,4,3,2,6,1))
+table(data_updated$EDUCATION)
+
+# Update data type of target variable "CLASS" to factor
+data_updated$CLASS <- as.factor(data_updated$CLASS)
+
+# Check the levels of target variable
+levels(data_updated$CLASS)
+
+# Confirm data anomalies are resolved
+summary(data_updated)
+```
+
+## Partitioning dataset for modelling 
+```{r}
+# Set seed to 10
+set.seed(10)
+
+# Partition the dataset
+split <- sample.split(data_updated$CLASS, SplitRatio = 0.7)
+
+# Generate training and test sets
+trainingdata <- subset(data_updated, split == TRUE)
+testdata <- subset(data_updated, split == FALSE)
+```
+
+## Computing information gain values of attributes
+```{r}
+# Compute information gain values of attributes for trainingdata
+attr_weights <- information.gain(CLASS~., trainingdata)
+
+# Sort the information gain values from highest to lowest
+sorted_weights <- attr_weights[order(-attr_weights$attr_importance), ,drop = FALSE]
+
+# Identify attributes useful for modelling
+attr_insignificant <- which(attr_weights$attr_importance < 0.00001)
+
+# Update dataset to keep only attributes useful for modelling
+trainingdata <- trainingdata[,-attr_insignificant]
+
+# View updated trainingdata
+summary(trainingdata)
+
+# Select the same variables of trainingdata for testdata
+testdata <- select(testdata, colnames(trainingdata))
+```
+
+## No Data Rebalancing 
+```{r}
+# Convert target variable in trainingdata to factor for SVM and RF
+trainingdata_norebalance <- trainingdata
+trainingdata_norebalance$CLASS <- as.factor(trainingdata$CLASS)
+
+# Check if target variable has been converted to factor
+str(trainingdata_norebalance$CLASS)
+```
+
+## Data Rebalancing via oversampling technique, ovun.sample()
+```{r}
+# Check the proportion of "CLASS" variable in the training data 
+prop.table(table(trainingdata$CLASS))
+
+# Rebalance proportion of "CLASS" variable via over-sampling technique
+trainingdata_oversampled <- ovun.sample(CLASS~. , data = trainingdata, method = "over", p= 0.5, seed=1)$data
+
+# Check the proportion of "CLASS" variable after a data rebalance
+prop.table(table(trainingdata_oversampled$CLASS))
+
+# Check if target variable is a factor for SVM and RF
+str(trainingdata_oversampled$CLASS)
+```
+
+## Data Rebalancing via oversampling technique, SMOTE()
+```{r}
+# Get the number of each category in the target variable
+table(data_updated$CLASS)
+
+# Change the data type of the target variable
+trainingdata$CLASS <- as.numeric(trainingdata$CLASS)-1
+
+# Do the SMOTE to trainingdata
+trainingdata_transform <- SMOTE(trainingdata, trainingdata$CLASS, K=5, dup_size=0)
+
+# Extract the trainingdata after doing SMOTE
+trainingdata_SMOTE <- trainingdata_transform$data
+trainingdata_SMOTE$class <- NULL
+
+# Update data type of target variable "CLASS" to category data
+trainingdata_SMOTE$CLASS <- as.factor(trainingdata_SMOTE$CLASS)
+
+# Get the number of each category in the target variable
+table(trainingdata_SMOTE$CLASS)
+```
+
+# Modelling stage in CRISP-DM
+## Using No Rebalancing Data "trainingdata_norebalance"
+### Support Vector Machines model (SVM)
+```{r}
+# Build SVM model and assign it to model_SVM
+SVM_model_NR <- svm(CLASS ~., data=trainingdata_norebalance, kernel="radial",
+                 scale=TRUE, probability=TRUE)
+
+# Predict the target variable of the test data using model_SVM
+SVM_pred_NR <- predict(SVM_model_NR, testdata, probability=TRUE)
+
+# Use confusionMatrix to print the performance of SVM model
+confusionMatrix(SVM_pred_NR, testdata$CLASS, positive = '1',
+                mode = "prec_recall")
+```
+
+### Random Forest model (RF)
+```{r}
+# Set random seed
+set.seed(10)
+
+# Build Random Forest model and assign it to RF_model
+RF_model_NR <- randomForest(CLASS~., trainingdata_norebalance, ntree = 800)
+
+# Predict the target variable of the test data using Random Forest model
+RF_pred_NR <- predict(RF_model_NR, testdata)
+
+# Use confusionMatrix to print the performance of Random Forest Model
+confusionMatrix(RF_pred_NR, testdata$CLASS, positive = '1',
+                mode = "prec_recall")
+```
+
+### Gradient Boosting Machines model (GBM)
+```{r}
+# GBM requires the target variable as a numeric data type
+# Therefore, we change the data type of the target variable
+# The syntax "-1" is necessary to treat indexes 1 and 2, as 0 and 1
+trainingdata_norebalance$CLASS <- as.numeric(trainingdata_norebalance$CLASS)-1
+
+# Set random seed
+set.seed(10)
+
+# Build the GBM model
+GBM_model_NR <- gbm(CLASS~., trainingdata_norebalance, distribution = "bernoulli",
+                 n.trees = 500, interaction.depth = 1, cv.folds = 2)
+
+# Find the number of optimum trees for the prediction
+ntree_opt_NR <- gbm.perf(GBM_model_NR, method = "cv")
+
+# Obtain prediction probabilities using ntree_opt
+GBM_prob_NR <-  predict(GBM_model_NR, testdata, n.trees = ntree_opt_NR,
+                     type = "response")
+
+# Make predictions with threshold value 0.5
+GBM_pred_NR <- ifelse(GBM_prob_NR >= 0.5, "1", "0")
+
+# Save the predictions as a factor variable
+GBM_pred_NR <- as.factor(GBM_pred_NR)
+
+# Use confusionMatrix to print the performance of GBM
+confusionMatrix(GBM_pred_NR, testdata$CLASS, positive='1',
+                mode = "prec_recall")
+```
+
+# Evaluation stage in CRISP-DM
+## Using No Rebalancing Data "trainingdata_norebalance"
+### Adding probabilities to the SVM and RF models
+```{r}
+# Add probability = TRUE for SVM
+SVMpred_NR <- predict(SVM_model_NR, testdata, probability = TRUE)
+
+# Use SVMpred to extract probabilities
+SVM_prob_NR <- attr(SVMpred_NR, "probabilities")
+
+# Obtain class probabilities by using predict() and adding type = "prob" for Random Forest
+RF_prob_NR <- predict(RF_model_NR, testdata, type = "prob")
+```
+
+### Generate input data for the ROC curve.
+```{r}
+# Provide probabilities and generate input data
+
+# SVM
+ROC_SVM_NR <- roc(testdata$CLASS, SVM_prob_NR[,2])
+
+# Random Forest
+ROC_RF_NR <- roc(testdata$CLASS, RF_prob_NR[,2])
+
+# GBM
+ROC_GBM_NR <- roc(testdata$CLASS, GBM_prob_NR)
+```
+
+### Extract True Positive Rate (Sensitivities) and False Positive Rate (1-Specificities) for plotting
+```{r}
+# Extract required data from ROC_SVM
+df_SVM_NR = data.frame((1-ROC_SVM_NR$specificities), ROC_SVM_NR$sensitivities)
+
+# Extract required data from ROC_RF
+df_RF_NR = data.frame((1-ROC_RF_NR$specificities), ROC_RF_NR$sensitivities)
+
+# Extract required data from ROC_GBM
+df_GBM_NR = data.frame((1-ROC_GBM_NR$specificities), ROC_GBM_NR$sensitivities)
+```
+
+### Plot the ROC curve for SVM, RF and GBM
+```{r}
+#plot the ROC curve for Random Forest, SVM, GBM and LR
+plot(df_SVM_NR, col="red", type="l",     
+xlab="False Positive Rate (1-Specificity)", ylab="True Positive Rate (Recall)")
+lines(df_RF_NR, col="blue")                #adds ROC curve for RF
+lines(df_GBM_NR, col="green")              #adds ROC curve for GBM
+grid(NULL, lwd = 1)
+
+abline(a = 0, b = 1, col = "lightgray") #adds a diagonal line
+
+legend("bottomright",
+c("SVM", "RF", "GBM"),
+fill=c("red","blue", "green"))
+```
+
+### Compute AUC values for SVM, RF, and GBM
+```{r}
+#Calculate the area under the curve (AUC) for SVM 
+auc(ROC_SVM_NR)
+
+#Calculate the area under the curve (AUC) for RF
+auc(ROC_RF_NR)
+
+#Calculate the area under the curve (AUC) for GBM 
+auc(ROC_GBM_NR)
+```
+
+### Plot the gain chart with increment of 1/100
+```{r}
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+GainTable_SVM_NR <- cumGainsTable(SVM_prob_NR[,2], testdata$CLASS, resolution = 1/100)
+
+GainTable_RF_NR <- cumGainsTable(RF_prob_NR[,2], testdata$CLASS, resolution = 1/100)
+
+GainTable_GBM_NR <- cumGainsTable(GBM_prob_NR, testdata$CLASS, resolution = 1/100)
+
+plot(GainTable_SVM_NR[,4], col="red", type="l",    
+xlab="Percentage of test instances", ylab="Percentage of correct predictions")
+lines(GainTable_RF_NR[,4], col="blue", type ="l")
+lines(GainTable_GBM_NR[,4], col="green", type ="l")
+grid(NULL, lwd = 1)
+
+legend("bottomright",
+c("SVM", "RF", "GBM"),
+fill=c("red","blue", "green"))
+```
+
+# Modelling stage in CRISP-DM
+## Using Rebalancing Data "trainingdata_oversampled"
+### Support Vector Machines model (SVM)
+```{r}
+# Build SVM model and assign it to model_SVM
+SVM_model_DR <- svm(CLASS ~., data=trainingdata_oversampled, kernel="radial",
+                 scale=TRUE, probability=TRUE)
+
+# Predict the target variable of the test data using model_SVM
+SVM_pred_DR <- predict(SVM_model_DR, testdata, probability=TRUE)
+
+# Use confusionMatrix to print the performance of SVM model
+confusionMatrix(SVM_pred_DR, testdata$CLASS, positive = '1',
+                mode = "prec_recall")
+```
+
+### Random Forest model (RF)
+```{r}
+# Set random seed
+set.seed(10)
+
+# Build Random Forest model and assign it to RF_model
+RF_model_DR <- randomForest(CLASS~., trainingdata_oversampled, ntree = 800)
+
+# Predict the target variable of the test data using Random Forest model
+RF_pred_DR <- predict(RF_model_DR, testdata)
+
+# Use confusionMatrix to print the performance of Random Forest Model
+confusionMatrix(RF_pred_DR, testdata$CLASS, positive = '1',
+                mode = "prec_recall")
+```
+
+### Gradient Boosting Machines model (GBM)
+```{r}
+# GBM requires the target variable as a numeric data type
+# Therefore, we change the data type of the target variable
+# The syntax "-1" is necessary to treat indexes 1 and 2, as 0 and 1
+trainingdata_oversampled$CLASS <- as.numeric(trainingdata_oversampled$CLASS)-1
+
+# Set random seed
+set.seed(10)
+
+# Build the GBM model
+GBM_model_DR <- gbm(CLASS~., trainingdata_oversampled, distribution = "bernoulli",
+                 n.trees = 500, interaction.depth = 1, cv.folds = 2)
+
+# Find the number of optimum trees for the prediction
+ntree_opt_DR <- gbm.perf(GBM_model_DR, method = "cv")
+
+# Obtain prediction probabilities using ntree_opt
+GBM_prob_DR <-  predict(GBM_model_DR, testdata, n.trees = ntree_opt_DR,
+                     type = "response")
+
+# Make predictions with threshold value 0.5
+GBM_pred_DR <- ifelse(GBM_prob_DR >= 0.5, "1", "0")
+
+# Save the predictions as a factor variable
+GBM_pred_DR <- as.factor(GBM_pred_DR)
+
+# Use confusionMatrix to print the performance of GBM
+confusionMatrix(GBM_pred_DR, testdata$CLASS, positive='1',
+                mode = "prec_recall")
+```
+
+# Evaluation stage in CRISP-DM
+## Using Rebalancing Data "trainingdata_oversampled"
+### Adding probabilities to the SVM and RF models
+```{r}
+# Add probability = TRUE for SVM
+SVMpred_DR <- predict(SVM_model_DR, testdata, probability = TRUE)
+
+# Use SVMpred to extract probabilities
+SVM_prob_DR <- attr(SVMpred_DR, "probabilities")
+
+# Obtain class probabilities by using predict() and adding type = "prob" for Random Forest
+RF_prob_DR <- predict(RF_model_DR, testdata, type = "prob")
+```
+
+### Generate input data for the ROC curve.
+```{r}
+# Provide probabilities and generate input data
+
+# SVM
+ROC_SVM_DR <- roc(testdata$CLASS, SVM_prob_DR[,2])
+
+# Random Forest
+ROC_RF_DR <- roc(testdata$CLASS, RF_prob_DR[,2])
+
+# GBM
+ROC_GBM_DR <- roc(testdata$CLASS, GBM_prob_DR)
+```
+
+### Extract True Positive Rate (Sensitivities) and False Positive Rate (1-Specificities) for plotting
+```{r}
+# Extract required data from ROC_SVM
+df_SVM_DR = data.frame((1-ROC_SVM_DR$specificities), ROC_SVM_DR$sensitivities)
+
+# Extract required data from ROC_RF
+df_RF_DR = data.frame((1-ROC_RF_DR$specificities), ROC_RF_DR$sensitivities)
+
+# Extract required data from ROC_GBM
+df_GBM_DR = data.frame((1-ROC_GBM_DR$specificities), ROC_GBM_DR$sensitivities)
+```
+
+### Plot the ROC curve for SVM, RF and GBM
+```{r}
+#plot the ROC curve for Random Forest, SVM, GBM and LR
+plot(df_SVM_DR, col="red", type="l",     
+xlab="False Positive Rate (1-Specificity)", ylab="True Positive Rate (Recall)")
+lines(df_RF_DR, col="blue")                #adds ROC curve for RF
+lines(df_GBM_DR, col="green")              #adds ROC curve for GBM
+grid(NULL, lwd = 1)
+
+abline(a = 0, b = 1, col = "lightgray") #adds a diagonal line
+
+legend("bottomright",
+c("SVM", "RF", "GBM"),
+fill=c("red","blue", "green"))
+```
+
+### Compute AUC values for SVM, RF, and GBM
+```{r}
+#Calculate the area under the curve (AUC) for SVM 
+auc(ROC_SVM_DR)
+
+#Calculate the area under the curve (AUC) for RF
+auc(ROC_RF_DR)
+
+#Calculate the area under the curve (AUC) for GBM 
+auc(ROC_GBM_DR)
+```
+
+### Plot the gain chart with increment of 1/100
+```{r}
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+GainTable_SVM_DR <- cumGainsTable(SVM_prob_DR[,2], testdata$CLASS, resolution = 1/100)
+
+GainTable_RF_DR <- cumGainsTable(RF_prob_DR[,2], testdata$CLASS, resolution = 1/100)
+
+GainTable_GBM_DR <- cumGainsTable(GBM_prob_DR, testdata$CLASS, resolution = 1/100)
+
+plot(GainTable_SVM_DR[,4], col="red", type="l",    
+xlab="Percentage of test instances", ylab="Percentage of correct predictions")
+lines(GainTable_RF_DR[,4], col="blue", type ="l")
+lines(GainTable_GBM_DR[,4], col="green", type ="l")
+grid(NULL, lwd = 1)
+
+legend("bottomright",
+c("SVM", "RF", "GBM"),
+fill=c("red","blue", "green"))
+```
+
+# Modelling stage in CRISP-DM
+## Using Rebalancing Data "trainingdata_SMOTE"
+### Support Vector Machines model (SVM)
+```{r}
+# Build SVM model and assign it to model_SVM
+SVM_model_SMOTE <- svm(CLASS ~., data=trainingdata_SMOTE, kernel="radial",
+                 scale=TRUE, probability=TRUE)
+
+# Predict the target variable of the test data using model_SVM
+SVM_pred_SMOTE <- predict(SVM_model_SMOTE, testdata, probability=TRUE)
+
+# Use confusionMatrix to print the performance of SVM model
+confusionMatrix(SVM_pred_SMOTE, testdata$CLASS, positive = '1',
+                mode = "prec_recall")
+```
+
+### Random Forest model (RF)
+```{r}
+# Set random seed
+set.seed(10)
+
+# Build Random Forest model and assign it to RF_model
+RF_model_SMOTE <- randomForest(CLASS~., trainingdata_SMOTE, ntree = 800)
+
+# Predict the target variable of the test data using Random Forest model
+RF_pred_SMOTE <- predict(RF_model_SMOTE, testdata)
+
+# Use confusionMatrix to print the performance of Random Forest Model
+confusionMatrix(RF_pred_SMOTE, testdata$CLASS, positive = '1',
+                mode = "prec_recall")
+```
+
+### Gradient Boosting Machines model (GBM)
+```{r}
+# GBM requires the target variable as a numeric data type
+# Therefore, we change the data type of the target variable
+# The syntax "-1" is necessary to treat indexes 1 and 2, as 0 and 1
+trainingdata_SMOTE$CLASS <- as.numeric(trainingdata_SMOTE$CLASS)-1
+
+# Set random seed
+set.seed(10)
+
+# Build the GBM model
+GBM_model_SMOTE <- gbm(CLASS~., trainingdata_SMOTE, distribution = "bernoulli",
+                 n.trees = 500, interaction.depth = 1, cv.folds = 2)
+
+# Find the number of optimum trees for the prediction
+ntree_opt_SMOTE <- gbm.perf(GBM_model_SMOTE, method = "cv")
+
+# Obtain prediction probabilities using ntree_opt
+GBM_prob_SMOTE <-  predict(GBM_model_SMOTE, testdata, n.trees = ntree_opt_SMOTE,
+                     type = "response")
+
+# Make predictions with threshold value 0.5
+GBM_pred_SMOTE <- ifelse(GBM_prob_SMOTE >= 0.5, "1", "0")
+
+# Save the predictions as a factor variable
+GBM_pred_SMOTE <- as.factor(GBM_pred_SMOTE)
+
+# Use confusionMatrix to print the performance of GBM
+confusionMatrix(GBM_pred_SMOTE, testdata$CLASS, positive='1',
+                mode = "prec_recall")
+```
+
+# Evaluation stage in CRISP-DM
+## Using Rebalancing Data "trainingdata_SMOTE"
+### Adding probabilities to the SVM and RF models
+```{r}
+# Add probability = TRUE for SVM
+SVMpred_SMOTE <- predict(SVM_model_SMOTE, testdata, probability = TRUE)
+
+# Use SVMpred to extract probabilities
+SVM_prob_SMOTE <- attr(SVMpred_SMOTE, "probabilities")
+
+# Obtain class probabilities by using predict() and adding type = "prob" for Random Forest
+RF_prob_SMOTE <- predict(RF_model_SMOTE, testdata, type = "prob")
+```
+
+### Generate input data for the ROC curve.
+```{r}
+# Provide probabilities and generate input data
+
+# SVM
+ROC_SVM_SMOTE <- roc(testdata$CLASS, SVM_prob_SMOTE[,2])
+
+# Random Forest
+ROC_RF_SMOTE <- roc(testdata$CLASS, RF_prob_SMOTE[,2])
+
+# GBM
+ROC_GBM_SMOTE <- roc(testdata$CLASS, GBM_prob_SMOTE)
+```
+
+### Extract True Positive Rate (Sensitivities) and False Positive Rate (1-Specificities) for plotting
+```{r}
+# Extract required data from ROC_SVM
+df_SVM_SMOTE = data.frame((1-ROC_SVM_SMOTE$specificities), ROC_SVM_SMOTE$sensitivities)
+
+# Extract required data from ROC_RF
+df_RF_SMOTE = data.frame((1-ROC_RF_SMOTE$specificities), ROC_RF_SMOTE$sensitivities)
+
+# Extract required data from ROC_GBM
+df_GBM_SMOTE = data.frame((1-ROC_GBM_SMOTE$specificities), ROC_GBM_SMOTE$sensitivities)
+```
+
+### Plot the ROC curve for SVM, RF and GBM
+```{r}
+#plot the ROC curve for Random Forest, SVM, GBM and LR
+plot(df_SVM_SMOTE, col="red", type="l",     
+xlab="False Positive Rate (1-Specificity)", ylab="True Positive Rate (Recall)")
+lines(df_RF_SMOTE, col="blue")                #adds ROC curve for RF
+lines(df_GBM_SMOTE, col="green")              #adds ROC curve for GBM
+grid(NULL, lwd = 1)
+
+abline(a = 0, b = 1, col = "lightgray") #adds a diagonal line
+
+legend("bottomright",
+c("SVM", "RF", "GBM"),
+fill=c("red","blue", "green"))
+```
+
+### Compute AUC values for SVM, RF, and GBM
+```{r}
+#Calculate the area under the curve (AUC) for SVM 
+auc(ROC_SVM_SMOTE)
+
+#Calculate the area under the curve (AUC) for RF
+auc(ROC_RF_SMOTE)
+
+#Calculate the area under the curve (AUC) for GBM 
+auc(ROC_GBM_SMOTE)
+```
+
+### Plot the gain chart with increment of 1/100
+```{r}
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+GainTable_SVM_SMOTE <- cumGainsTable(SVM_prob_SMOTE[,2], testdata$CLASS, resolution = 1/100)
+
+GainTable_RF_SMOTE <- cumGainsTable(RF_prob_SMOTE[,2], testdata$CLASS, resolution = 1/100)
+
+GainTable_GBM_SMOTE <- cumGainsTable(GBM_prob_SMOTE, testdata$CLASS, resolution = 1/100)
+
+plot(GainTable_SVM_SMOTE[,4], col="red", type="l",    
+xlab="Percentage of test instances", ylab="Percentage of correct predictions")
+lines(GainTable_RF_SMOTE[,4], col="blue", type ="l")
+lines(GainTable_GBM_SMOTE[,4], col="green", type ="l")
+grid(NULL, lwd = 1)
+
+legend("bottomright",
+c("SVM", "RF", "GBM"),
+fill=c("red","blue", "green"))
+```
